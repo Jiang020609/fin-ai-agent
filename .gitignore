@@ -1,0 +1,13 @@
+node_modules/
+.next/
+__pycache__/
+.venv/
+*.pyc
+.env
+.DS_Store
+*.egg-info/
+dist/
+build/
+chroma_data/
+.claude/
+next-env.d.ts
