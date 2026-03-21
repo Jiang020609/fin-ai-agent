@@ -21,7 +21,7 @@ from typing import Callable
 
 import re as _re
 
-from app.services.llm import chat_completion, chat_completion_stream, classify_intent
+from app.services.llm import chat_completion, chat_completion_stream, classify_intent, classify_intent_with_tools
 from app.services.market import get_stock_summary
 from app.services.rag import get_relevant_context
 from app.services.web_search import web_search
@@ -31,6 +31,9 @@ from app.services.grounding import (
     validate_market_response_numbers,
     build_missing_field_notice,
 )
+from app.services.compare import compute_comparison
+from app.services.news_classifier import classify_evidence
+from app.services.session import SessionState
 from app.prompts.templates import (
     MARKET_SYSTEM_PROMPT,
     MARKET_USER_TEMPLATE,
@@ -39,15 +42,24 @@ from app.prompts.templates import (
     RAG_SYSTEM_PROMPT,
     RAG_USER_TEMPLATE,
     FACT_CHECK_PROMPT,
+    COMPARE_SYSTEM_PROMPT,
+    COMPARE_USER_TEMPLATE,
+    QUERY_TRANSFORM_PROMPT,
 )
-from app.utils.ticker_map import resolve_ticker
+from app.utils.ticker_map import resolve_ticker, resolve_tickers_multi
 from app.utils.date_extract import extract_date_ref, build_search_query
 
 logger = logging.getLogger(__name__)
 
 
 # ========== 快速意图分类（正则，免 LLM 调用） ==========
-# 注意顺序：reasoning 优先于 data，因为 reasoning 问题也可能包含行情关键词
+# 注意顺序：compare > reasoning > data，compare 优先级最高
+_COMPARE_PATTERNS = [
+    _re.compile(r"(对比|比较|对照|pk|PK)", _re.IGNORECASE),
+    _re.compile(r"\bvs\.?\b", _re.IGNORECASE),
+    _re.compile(r"(哪个更|谁更强|谁更好|哪只更|哪支更|哪个好)", _re.IGNORECASE),
+    _re.compile(r"(和|与|跟).{1,10}(比|对比|相比|比较)", _re.IGNORECASE),
+]
 _REASONING_PATTERNS = [
     _re.compile(r"(为什么|为何|原因|怎么回事|因为什么|受什么影响|什么导致|什么原因)", _re.IGNORECASE),
     _re.compile(r"(大涨|大跌|暴涨|暴跌|飙升|跳水|急涨|急跌).*(原因|为什么|为何|怎么)", _re.IGNORECASE),
@@ -67,9 +79,17 @@ _KNOWLEDGE_PATTERNS = [
 def fast_classify_intent(question: str) -> str | None:
     """正则快速分类，命中直接返回，未命中返回 None（需 LLM fallback）。
 
-    优先级：reasoning > market_data > knowledge_rag
-    reasoning 检测必须在 market_data 之前，因为"为什么涨"同时包含行情关键词。
+    优先级：compare > reasoning > market_data > knowledge_rag
+    compare 检测需要 2+ ticker 才成立。
     """
+    # compare 优先级最高，但需要 2+ ticker
+    for p in _COMPARE_PATTERNS:
+        if p.search(question):
+            tickers = resolve_tickers_multi(question)
+            if len(tickers) >= 2:
+                return "compare"
+            break  # 有对比意图但不够 2 个 ticker，继续其他分类
+
     for p in _REASONING_PATTERNS:
         if p.search(question):
             return "market_reasoning"
@@ -83,11 +103,13 @@ def fast_classify_intent(question: str) -> str | None:
 
 
 def _normalize_intent(raw: str) -> str:
-    """将 LLM 返回的意图标签归一化到 4 类。
+    """将 LLM 返回的意图标签归一化到 5 类。
 
     兼容旧的 'market' / 'knowledge' 标签。
     """
     r = raw.strip().lower()
+    if "compare" in r:
+        return "compare"
     if "market_reasoning" in r or "reasoning" in r:
         return "market_reasoning"
     if "market_data" in r or "market" in r:
@@ -181,15 +203,33 @@ def _parse_web_sources(raw_text: str) -> list[dict]:
 
 
 def _parse_rag_sources(context: str) -> list[dict]:
-    """从 RAG 格式化上下文中解析来源信息。"""
+    """从 RAG 格式化上下文中解析来源信息（含页码和相关度）。"""
     import re
     sources: list[dict] = []
     for block in context.split("\n\n---\n\n"):
         if not block.startswith("[参考资料"):
             continue
-        m = re.search(r'来源:\s*([^,\s)]+)', block)
+        m = re.search(r'来源:\s*([^,)]+),\s*页码:\s*([^,)]+),\s*相关度:\s*([\d.]+)', block)
         if m:
-            sources.append({"title": m.group(1), "source": "知识库", "url": None, "published_at": None})
+            page_raw = m.group(2).strip()
+            page = page_raw if page_raw != "-" else None
+            try:
+                score = float(m.group(3))
+            except ValueError:
+                score = None
+            sources.append({
+                "title": m.group(1).strip(),
+                "source": "知识库",
+                "url": None,
+                "published_at": None,
+                "page": page,
+                "relevance_score": score,
+            })
+        else:
+            # Fallback: 兼容旧格式
+            m2 = re.search(r'来源:\s*([^,\s)]+)', block)
+            if m2:
+                sources.append({"title": m2.group(1), "source": "知识库", "url": None, "published_at": None, "page": None, "relevance_score": None})
     return sources
 
 
@@ -224,6 +264,131 @@ def _build_trend_summary(market_data: dict) -> dict:
 
     trend_result = classify_trend_from_market_data(market_data)
     return trend_result.to_dict()
+
+
+# ========== 可解释性 Meta ==========
+def _build_explainability_meta(
+    data_sources: list[str],
+    evidence_count: int = 0,
+    has_api_data: bool = False,
+) -> dict:
+    """构建可解释性元数据。"""
+    confidence_data = "high" if has_api_data else "low"
+    if evidence_count >= 3:
+        confidence_reasoning = "high"
+    elif evidence_count >= 1:
+        confidence_reasoning = "medium"
+    else:
+        confidence_reasoning = "low"
+
+    return {
+        "data_sources": data_sources,
+        "evidence_count": evidence_count,
+        "confidence_data": confidence_data,
+        "confidence_reasoning": confidence_reasoning,
+    }
+
+
+# ========== Session 指代消解 ==========
+def _resolve_with_session(question: str, session: SessionState | None) -> tuple[str, list[str] | None, str | None]:
+    """利用 session 上下文消解指代。
+
+    返回 (resolved_question, session_tickers, inherited_intent)
+    """
+    if session is None:
+        return question, None, None
+
+    resolved_question = question
+    session_tickers = None
+    inherited_intent = None
+
+    # "它为什么涨" → 继承 session 中的资产
+    pronoun_pattern = _re.compile(
+        r"^(它|这只|这个|该股|这家|那个)(为什么|怎么|最近|现在)",
+        _re.IGNORECASE,
+    )
+    if pronoun_pattern.search(question) and session.current_assets:
+        session_tickers = session.current_assets
+
+    # "那腾讯呢" → 继承 query 类型
+    continuation_pattern = _re.compile(r"^那.{1,6}呢[？?]?$")
+    if continuation_pattern.search(question) and session.last_intent:
+        inherited_intent = session.last_intent
+
+    # "再比一下" → compare 模式
+    recompare_pattern = _re.compile(r"(再比|再对比|继续比|再比较)")
+    if recompare_pattern.search(question) and session.last_intent == "compare":
+        inherited_intent = "compare"
+        if session.current_assets:
+            session_tickers = session.current_assets
+
+    return resolved_question, session_tickers, inherited_intent
+
+
+# ========== 对比处理 ==========
+_DISCLAIMER_COMPARE = "以上对比基于历史数据，不构成投资建议。不同时间窗口下结论可能不同。"
+
+
+def handle_compare_question(
+    question: str, tickers: list[str], steps: list[ThoughtStep], history: list[dict] | None = None
+) -> dict:
+    """处理多资产对比问题：逐个获取数据 → 计算对比指标 → LLM 分析。"""
+    # Step: 逐个获取行情数据
+    summaries = {}
+    for ticker in tickers:
+        steps.append(ThoughtStep(step=f"获取 {ticker} 数据", result="获取中..."))
+        summary = get_stock_summary(ticker)
+        summaries[ticker] = summary
+        available = summary.get("data_available", False)
+        steps[-1].result = f"data_available={available}"
+        steps[-1].detail = {
+            "current_price": summary.get("price", {}).get("current_price"),
+        }
+
+    # Step: 计算对比指标
+    steps.append(ThoughtStep(step="计算对比指标", result="计算中..."))
+    comparison = compute_comparison(summaries)
+    steps[-1].result = f"对比完成，{len(comparison['assets'])} 个资产"
+
+    # Step: LLM 生成对比分析
+    steps.append(ThoughtStep(step="LLM对比分析", result="调用中..."))
+    comparison_data_str = json.dumps(comparison["assets"], ensure_ascii=False, indent=2)
+    winners_str = json.dumps(comparison["winners"], ensure_ascii=False, indent=2)
+    user_message = COMPARE_USER_TEMPLATE.format(
+        question=question,
+        comparison_data=comparison_data_str,
+        winners=winners_str,
+    )
+    text_response = chat_completion(COMPARE_SYSTEM_PROMPT, user_message, history=history)
+    steps[-1].result = f"生成完毕，长度={len(text_response)}"
+
+    # 组装结构化回答
+    sources = [{"title": f"{t} 行情数据", "source": "yahoo", "url": None} for t in tickers]
+    meta = _build_explainability_meta(
+        data_sources=["yahoo_finance"],
+        evidence_count=0,
+        has_api_data=any(s.get("data_available") for s in summaries.values()),
+    )
+    structured_response = {
+        "response_type": "compare",
+        "data_summary": None,
+        "trend_summary": None,
+        "analysis": [{"title": "对比分析", "content": text_response}],
+        "sources": sources,
+        "disclaimer": _DISCLAIMER_COMPARE,
+        "comparison": comparison,
+        "meta": meta,
+    }
+
+    return {
+        "text_response": text_response,
+        "chart_data": None,
+        "intent": "compare",
+        "ticker": tickers[0],
+        "tickers": tickers,
+        "steps": [asdict(s) for s in steps],
+        "structured_response": structured_response,
+    }
 
 
 # ========== 行情处理 ==========
@@ -356,6 +521,10 @@ def handle_market_question(question: str, ticker: str, steps: list[ThoughtStep],
     market_meta = raw_meta if raw_meta.get("current_price") is not None else None
 
     # 组装结构化回答（程序端组装，保证准确性）
+    meta = _build_explainability_meta(
+        data_sources=["yahoo_finance"],
+        has_api_data=data_available,
+    )
     structured_response = {
         "response_type": "market_data",
         "data_summary": _build_data_summary(market_data),
@@ -363,6 +532,7 @@ def handle_market_question(question: str, ticker: str, steps: list[ThoughtStep],
         "analysis": [{"title": "分析与解读", "content": text_response}],
         "sources": [{"title": "行情数据", "source": market_data.get("data_source", "yahoo"), "url": None}],
         "disclaimer": _DISCLAIMER_MARKET,
+        "meta": meta,
     }
 
     return {
@@ -452,21 +622,36 @@ def handle_market_reasoning_question(
 
     evidence = web_search(search_query, max_results=5)
     evidence_sources: list[dict] = []
+    evidence_analysis_result = None
 
     if evidence:
         steps[-1].result = f"搜索命中，证据长度={len(evidence)}"
         evidence_sources = _parse_web_sources(evidence)
+
+        # Step: 证据分类
+        steps.append(ThoughtStep(step="证据分类", result="分类中..."))
+        ea = classify_evidence(evidence, asset_name, ticker)
+        evidence_analysis_result = {
+            "main_drivers": ea.main_drivers,
+            "secondary_drivers": ea.secondary_drivers,
+            "evidence_strength": ea.evidence_strength,
+            "summary": ea.summary,
+        }
+        steps[-1].result = ea.summary
+        steps[-1].detail = {"main_drivers": ea.main_drivers, "strength": ea.evidence_strength}
     else:
         steps[-1].result = "未配置搜索 API 或搜索无结果"
         evidence = "（未检索到相关新闻或事件证据）"
 
-    # 构建 prompt
+    # 构建 prompt（注入分类摘要）
     market_data_str = json.dumps(market_data, ensure_ascii=False, indent=2)
     user_message = MARKET_REASONING_USER_TEMPLATE.format(
         question=question,
         market_data=market_data_str,
         evidence=evidence,
     )
+    if evidence_analysis_result and evidence_analysis_result.get("summary"):
+        user_message += f"\n\n证据分类摘要：{evidence_analysis_result['summary']}"
 
     # Step: LLM 生成原因分析
     steps.append(ThoughtStep(step="LLM归因分析", result="调用中..."))
@@ -498,6 +683,11 @@ def handle_market_reasoning_question(
     all_sources = [{"title": "行情数据", "source": market_data.get("data_source", "yahoo"), "url": None}]
     all_sources.extend(evidence_sources)
 
+    meta = _build_explainability_meta(
+        data_sources=["yahoo_finance", "web_search"],
+        evidence_count=len(evidence_sources),
+        has_api_data=data_available,
+    )
     structured_response = {
         "response_type": "market_reasoning",
         "data_summary": _build_data_summary(market_data),
@@ -505,6 +695,8 @@ def handle_market_reasoning_question(
         "analysis": [{"title": "可能原因分析", "content": text_response}],
         "sources": all_sources,
         "disclaimer": _DISCLAIMER_REASONING,
+        "evidence_analysis": evidence_analysis_result,
+        "meta": meta,
     }
 
     return {
@@ -594,6 +786,16 @@ def handle_knowledge_question(question: str, steps: list[ThoughtStep], history: 
 
     # 组装结构化回答
     all_sources = rag_sources + web_sources
+    data_src = []
+    if rag_sources:
+        data_src.append("knowledge_base")
+    if web_sources:
+        data_src.append("web_search")
+    meta = _build_explainability_meta(
+        data_sources=data_src,
+        evidence_count=len(all_sources),
+        has_api_data=bool(all_sources),
+    )
     structured_response = {
         "response_type": "knowledge_rag",
         "data_summary": None,
@@ -601,6 +803,7 @@ def handle_knowledge_question(question: str, steps: list[ThoughtStep], history: 
         "analysis": [{"title": "知识问答", "content": text_response}],
         "sources": all_sources,
         "disclaimer": None,
+        "meta": meta,
     }
 
     return {
@@ -665,26 +868,91 @@ def _resolve_ticker_with_context(question: str, history: list[dict] | None) -> t
     return None, ""
 
 
+# ========== 查询改写 ==========
+# 快速跳过改写的信号：问题已包含明确的动作词 + ticker 名称
+_CLEAR_QUERY_PATTERN = _re.compile(
+    r"(股价|对比|比较|什么是|涨跌|走势|市值|行情|vs|price|compare|what\s+is)",
+    _re.IGNORECASE,
+)
+# 需要改写的信号：代词或模糊词
+_VAGUE_QUERY_PATTERN = _re.compile(
+    r"(它|这只|这个|该股|这家|那个|怎么样|最近|情况|如何$)",
+    _re.IGNORECASE,
+)
+
+
+def _transform_query(
+    question: str,
+    history: list[dict] | None,
+    session: SessionState | None,
+    steps: list[ThoughtStep],
+) -> str:
+    """将模糊/指代性查询改写为明确查询。
+
+    快速跳过已经明确的问题，避免额外 LLM 调用。
+    """
+    # 快速跳过：已经足够明确
+    if _CLEAR_QUERY_PATTERN.search(question) and not _VAGUE_QUERY_PATTERN.search(question):
+        return question
+
+    # 无改写信号也跳过
+    if not _VAGUE_QUERY_PATTERN.search(question):
+        return question
+
+    # 构建上下文
+    history_text = ""
+    if history:
+        recent = history[-4:]  # 最近 4 条
+        history_text = "\n".join(
+            f"{m.get('role', '?')}: {m.get('content', '')[:100]}" for m in recent
+        )
+
+    session_assets = ""
+    if session and session.current_assets:
+        session_assets = ", ".join(session.current_assets)
+
+    prompt = QUERY_TRANSFORM_PROMPT.format(
+        history=history_text or "（无历史）",
+        session_assets=session_assets or "（无）",
+        question=question,
+    )
+
+    try:
+        rewritten = chat_completion("你是一个查询改写助手。", prompt).strip()
+        if rewritten and rewritten != question:
+            steps.append(ThoughtStep(
+                step="查询改写",
+                result=f"'{question}' → '{rewritten}'",
+            ))
+            return rewritten
+    except Exception as e:
+        logger.warning("[QueryTransform] LLM call failed: %s", e)
+
+    return question
+
+
 # ========== 路由决策核心逻辑 ==========
 def _route_intent(question: str, ticker: str | None, steps: list[ThoughtStep]) -> str:
     """确定最终意图路由。
 
     优先级：
-    1. 快速正则分类
-    2. LLM fallback
+    1. 快速正则分类（节省 API 调用）
+    2. Function Calling 分类（替代纯文本 classify_intent）
     3. 如果有 ticker 但分类为 general，强制升级为 market_data
     """
+    # 1. 正则快速分类
     fast_intent = fast_classify_intent(question)
     if fast_intent:
         steps.append(ThoughtStep(step="快速意图分类", result=f"正则命中: {fast_intent}"))
         return fast_intent
 
-    steps.append(ThoughtStep(step="LLM意图分类", result="分类中..."))
-    raw_intent = classify_intent(question)
-    intent = _normalize_intent(raw_intent)
-    steps[-1].result = f"分类结果: {intent}"
+    # 2. Function Calling 分类
+    steps.append(ThoughtStep(step="Tool-based意图分类", result="分类中..."))
+    intent, tool_args = classify_intent_with_tools(question)
+    steps[-1].result = f"Tool 选择: {intent}"
+    steps[-1].detail = {"tool_args": tool_args}
 
-    # 如果有 ticker 但被分类为非 market 类，强制升级
+    # 3. Ticker 强制升级逻辑
     if ticker and intent not in ("market_data", "market_reasoning"):
         steps.append(ThoughtStep(step="意图修正", result=f"有 Ticker({ticker})，从 {intent} 升级为 market_data"))
         intent = "market_data"
@@ -694,16 +962,36 @@ def _route_intent(question: str, ticker: str | None, steps: list[ThoughtStep]) -
 
 # ========== 主入口（支持多轮对话） ==========
 @audit_log
-def process_question(question: str, history: list[dict] | None = None) -> dict:
+def process_question(question: str, history: list[dict] | None = None, session: SessionState | None = None) -> dict:
     """主入口：接收用户问题，执行分步思考链，路由到对应处理逻辑。
 
     思考链（steps）完整记录了 Agent 的决策过程：
-    1. Ticker 识别 → 2. 意图分类 → 3. Tool 调用 → 4. 数据校验 → 5. LLM 生成
+    1. Session 消解 → 2. Ticker 识别 → 3. 意图分类 → 4. Tool 调用 → 5. 数据校验 → 6. LLM 生成
     每一步都有 step/result/detail，便于调试和审计。
     """
     steps: list[ThoughtStep] = []
 
-    # Step 1: Ticker 识别（含上下文回溯）
+    # Step 0: Session 指代消解
+    session_tickers = None
+    inherited_intent = None
+    if session:
+        question, session_tickers, inherited_intent = _resolve_with_session(question, session)
+        if session_tickers:
+            steps.append(ThoughtStep(
+                step="Session消解",
+                result=f"从会话继承资产: {session_tickers}",
+                detail={"session_tickers": session_tickers, "inherited_intent": inherited_intent},
+            ))
+
+    # Step 0.5: 查询改写（模糊/指代性查询 → 明确查询）
+    question = _transform_query(question, history, session, steps)
+
+    # Step 1: 多 ticker 提取（对比场景）
+    multi_tickers = resolve_tickers_multi(question)
+    if session_tickers and len(multi_tickers) < 2:
+        multi_tickers = session_tickers
+
+    # Step 1b: 单 Ticker 识别（含上下文回溯）
     ticker, ticker_source = _resolve_ticker_with_context(question, history)
     if ticker and ticker_source == "history":
         steps.append(ThoughtStep(
@@ -715,23 +1003,37 @@ def process_question(question: str, history: list[dict] | None = None) -> dict:
         steps.append(ThoughtStep(
             step="Ticker识别",
             result=f"匹配到 {ticker}" if ticker else "未匹配到股票代码",
-            detail={"ticker": ticker},
+            detail={"ticker": ticker, "multi_tickers": multi_tickers},
         ))
 
     # Step 2: 路由决策
-    if ticker:
-        # 有 ticker 时，先判断是查数据还是问原因
-        intent = _route_intent(question, ticker, steps)
+    # compare 路由优先：2+ ticker + compare 意图
+    intent = inherited_intent or _route_intent(question, ticker, steps)
 
+    if intent == "compare" and len(multi_tickers) >= 2:
+        steps.append(ThoughtStep(step="意图路由", result=f"compare（{len(multi_tickers)} 个资产）"))
+        result = handle_compare_question(question, multi_tickers, steps, history=history)
+        if session:
+            session.update(assets=multi_tickers, intent="compare")
+        return result
+
+    if ticker:
         if intent == "market_reasoning":
             steps.append(ThoughtStep(step="意图路由", result="market_reasoning（原因分析）"))
-            return handle_market_reasoning_question(question, ticker, steps, history=history)
+            result = handle_market_reasoning_question(question, ticker, steps, history=history)
+            if session:
+                session.update(assets=[ticker], intent="market_reasoning")
+            return result
         else:
             steps.append(ThoughtStep(step="意图路由", result="market_data（基于 Ticker 命中）"))
-            return handle_market_question(question, ticker, steps, history=history)
+            result = handle_market_question(question, ticker, steps, history=history)
+            if session:
+                session.update(assets=[ticker], intent="market_data")
+            return result
 
     # Step 3: 无 ticker 时的路由
-    intent = _route_intent(question, ticker, steps)
+    if intent not in ("compare",):
+        intent = _route_intent(question, ticker, steps)
 
     if intent in ("market_data", "market_reasoning"):
         # 最后一次尝试：从历史中找 ticker
@@ -768,7 +1070,7 @@ def process_question(question: str, history: list[dict] | None = None) -> dict:
 
 
 # ========== 流式主入口 ==========
-def process_question_stream(question: str, history: list[dict] | None = None):
+def process_question_stream(question: str, history: list[dict] | None = None, session: SessionState | None = None):
     """流式生成器：yield SSE 事件字典。
 
     事件类型：thought / token / chart / meta / done / error
@@ -779,7 +1081,29 @@ def process_question_stream(question: str, history: list[dict] | None = None):
     steps: list[ThoughtStep] = []
 
     try:
-        # Step 1: Ticker 识别（含上下文回溯）
+        # Step 0: Session 指代消解
+        session_tickers = None
+        inherited_intent = None
+        if session:
+            question, session_tickers, inherited_intent = _resolve_with_session(question, session)
+            if session_tickers:
+                steps.append(ThoughtStep(
+                    step="Session消解",
+                    result=f"从会话继承资产: {session_tickers}",
+                ))
+                yield {"event": "thought", "data": asdict(steps[-1])}
+
+        # Step 0.5: 查询改写（模糊/指代性查询 → 明确查询）
+        question = _transform_query(question, history, session, steps)
+        if steps and steps[-1].step == "查询改写":
+            yield {"event": "thought", "data": asdict(steps[-1])}
+
+        # Step 1: 多 ticker 提取
+        multi_tickers = resolve_tickers_multi(question)
+        if session_tickers and len(multi_tickers) < 2:
+            multi_tickers = session_tickers
+
+        # Step 1b: Ticker 识别（含上下文回溯）
         ticker, ticker_source = _resolve_ticker_with_context(question, history)
         if ticker and ticker_source == "history":
             steps.append(ThoughtStep(
@@ -791,28 +1115,43 @@ def process_question_stream(question: str, history: list[dict] | None = None):
             steps.append(ThoughtStep(
                 step="Ticker识别",
                 result=f"匹配到 {ticker}" if ticker else "未匹配到股票代码",
-                detail={"ticker": ticker},
+                detail={"ticker": ticker, "multi_tickers": multi_tickers},
             ))
         yield {"event": "thought", "data": asdict(steps[-1])}
 
-        # Step 2: 有 ticker 的路由
+        # Step 2: 路由决策
+        intent = inherited_intent or _route_intent(question, ticker, steps)
+
+        # compare 路由优先
+        if intent == "compare" and len(multi_tickers) >= 2:
+            steps.append(ThoughtStep(step="意图路由", result=f"compare（{len(multi_tickers)} 个资产）"))
+            yield {"event": "thought", "data": asdict(steps[-1])}
+            yield from _stream_compare(question, multi_tickers, steps, history)
+            if session:
+                session.update(assets=multi_tickers, intent="compare")
+            return
+
         if ticker:
-            intent = _route_intent(question, ticker, steps)
-            for s in steps[-2:]:  # yield 新增的分类步骤
+            for s in steps[-2:]:
                 yield {"event": "thought", "data": asdict(s)}
 
             if intent == "market_reasoning":
                 steps.append(ThoughtStep(step="意图路由", result="market_reasoning（原因分析）"))
                 yield {"event": "thought", "data": asdict(steps[-1])}
                 yield from _stream_market_reasoning(question, ticker, steps, history)
+                if session:
+                    session.update(assets=[ticker], intent="market_reasoning")
             else:
                 steps.append(ThoughtStep(step="意图路由", result="market_data（基于 Ticker 命中）"))
                 yield {"event": "thought", "data": asdict(steps[-1])}
                 yield from _stream_market(question, ticker, steps, history)
+                if session:
+                    session.update(assets=[ticker], intent="market_data")
             return
 
         # Step 3: 无 ticker 的路由
-        intent = _route_intent(question, ticker, steps)
+        if not inherited_intent:
+            intent = _route_intent(question, ticker, steps)
         for s in steps[-2:]:
             yield {"event": "thought", "data": asdict(s)}
 
@@ -855,6 +1194,67 @@ def process_question_stream(question: str, history: list[dict] | None = None):
     except Exception as e:
         logger.error("[STREAM] Error: %s", e)
         yield {"event": "error", "data": {"message": str(e)}}
+
+
+def _stream_compare(question: str, tickers: list[str], steps: list[ThoughtStep], history: list[dict] | None = None):
+    """流式多资产对比。"""
+    # 逐个获取数据，每个 ticker 一个 thought 事件
+    summaries = {}
+    for ticker in tickers:
+        steps.append(ThoughtStep(step=f"获取 {ticker} 数据", result="获取中..."))
+        yield {"event": "thought", "data": asdict(steps[-1])}
+
+        summary = get_stock_summary(ticker)
+        summaries[ticker] = summary
+        available = summary.get("data_available", False)
+        steps[-1].result = f"data_available={available}"
+        steps[-1].detail = {"current_price": summary.get("price", {}).get("current_price")}
+        yield {"event": "thought", "data": asdict(steps[-1])}
+
+    # 计算对比指标
+    steps.append(ThoughtStep(step="计算对比指标", result="计算中..."))
+    yield {"event": "thought", "data": asdict(steps[-1])}
+    comparison = compute_comparison(summaries)
+    steps[-1].result = f"对比完成，{len(comparison['assets'])} 个资产"
+    yield {"event": "thought", "data": asdict(steps[-1])}
+
+    # Meta 事件
+    meta = _build_explainability_meta(
+        data_sources=["yahoo_finance"],
+        has_api_data=any(s.get("data_available") for s in summaries.values()),
+    )
+    structured_response = {
+        "response_type": "compare",
+        "data_summary": None,
+        "trend_summary": None,
+        "analysis": [],
+        "sources": [{"title": f"{t} 行情数据", "source": "yahoo", "url": None} for t in tickers],
+        "disclaimer": _DISCLAIMER_COMPARE,
+        "comparison": comparison,
+        "meta": meta,
+    }
+    yield {"event": "meta", "data": {
+        "intent": "compare", "ticker": tickers[0], "tickers": tickers,
+        "rag_used": None,
+        "structured_response": structured_response,
+    }}
+
+    # 流式 LLM
+    comparison_data_str = json.dumps(comparison["assets"], ensure_ascii=False, indent=2)
+    winners_str = json.dumps(comparison["winners"], ensure_ascii=False, indent=2)
+    user_message = COMPARE_USER_TEMPLATE.format(
+        question=question,
+        comparison_data=comparison_data_str,
+        winners=winners_str,
+    )
+
+    steps.append(ThoughtStep(step="LLM对比分析", result="流式生成中..."))
+    yield {"event": "thought", "data": asdict(steps[-1])}
+    for token in chat_completion_stream(COMPARE_SYSTEM_PROMPT, user_message, history=history):
+        yield {"event": "token", "data": token}
+
+    steps[-1].result = "生成完毕"
+    yield {"event": "done", "data": {"steps": [asdict(s) for s in steps]}}
 
 
 def _stream_market(question: str, ticker: str, steps: list[ThoughtStep], history: list[dict] | None = None):
@@ -1009,19 +1409,39 @@ def _stream_market_reasoning(question: str, ticker: str, steps: list[ThoughtStep
 
     evidence = web_search(search_query, max_results=5)
     evidence_sources: list[dict] = []
+    evidence_analysis_result = None
 
     if evidence:
         steps[-1].result = f"搜索命中，证据长度={len(evidence)}"
         evidence_sources = _parse_web_sources(evidence)
+        yield {"event": "thought", "data": asdict(steps[-1])}
+
+        # 证据分类
+        steps.append(ThoughtStep(step="证据分类", result="分类中..."))
+        yield {"event": "thought", "data": asdict(steps[-1])}
+        ea = classify_evidence(evidence, asset_name, ticker)
+        evidence_analysis_result = {
+            "main_drivers": ea.main_drivers,
+            "secondary_drivers": ea.secondary_drivers,
+            "evidence_strength": ea.evidence_strength,
+            "summary": ea.summary,
+        }
+        steps[-1].result = ea.summary
+        yield {"event": "thought", "data": asdict(steps[-1])}
     else:
         steps[-1].result = "未配置搜索 API 或搜索无结果"
         evidence = "（未检索到相关新闻或事件证据）"
-    yield {"event": "thought", "data": asdict(steps[-1])}
+        yield {"event": "thought", "data": asdict(steps[-1])}
 
     # 组装结构化回答
     all_sources = [{"title": "行情数据", "source": market_data.get("data_source", "yahoo"), "url": None}]
     all_sources.extend(evidence_sources)
 
+    meta = _build_explainability_meta(
+        data_sources=["yahoo_finance", "web_search"],
+        evidence_count=len(evidence_sources),
+        has_api_data=data_available,
+    )
     structured_response = {
         "response_type": "market_reasoning",
         "data_summary": _build_data_summary(market_data),
@@ -1029,6 +1449,8 @@ def _stream_market_reasoning(question: str, ticker: str, steps: list[ThoughtStep
         "analysis": [],
         "sources": all_sources,
         "disclaimer": _DISCLAIMER_REASONING,
+        "evidence_analysis": evidence_analysis_result,
+        "meta": meta,
     }
 
     yield {"event": "meta", "data": {
@@ -1049,13 +1471,15 @@ def _stream_market_reasoning(question: str, ticker: str, steps: list[ThoughtStep
         yield {"event": "done", "data": {"steps": [asdict(s) for s in steps]}}
         return
 
-    # 构建 prompt
+    # 构建 prompt（注入分类摘要）
     market_data_str = json.dumps(market_data, ensure_ascii=False, indent=2)
     user_message = MARKET_REASONING_USER_TEMPLATE.format(
         question=question,
         market_data=market_data_str,
         evidence=evidence,
     )
+    if evidence_analysis_result and evidence_analysis_result.get("summary"):
+        user_message += f"\n\n证据分类摘要：{evidence_analysis_result['summary']}"
 
     # 流式 LLM
     steps.append(ThoughtStep(step="LLM归因分析", result="流式生成中..."))

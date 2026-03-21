@@ -11,6 +11,7 @@ class HistoryMessage(BaseModel):
 class ChatRequest(BaseModel):
     question: str
     history: list[HistoryMessage] = []
+    session_id: str | None = None
 
 
 class ChartPoint(BaseModel):
@@ -66,12 +67,37 @@ class SourceItem(BaseModel):
     source: str = ""                     # 来源名称（如 Tavily、知识库文档名）
     url: str | None = None
     published_at: str | None = None
+    page: str | None = None              # 页码（PDF），如 "3"
+    relevance_score: float | None = None  # 相关度 0-1
 
 
 class AnalysisSection(BaseModel):
     """分析段落 — LLM 生成的解读内容。"""
     title: str = ""
     content: str = ""
+
+
+class ExplainabilityMeta(BaseModel):
+    """可解释性元数据 — 记录数据来源和置信度信息。"""
+    data_sources: list[str] = []          # 使用了哪些数据源
+    evidence_count: int = 0               # 证据条数
+    confidence_data: str = "low"          # 数据置信度: high / medium / low
+    confidence_reasoning: str = "low"     # 推理置信度: high / medium / low
+
+
+class ComparisonResult(BaseModel):
+    """多资产对比结果。"""
+    assets: list[dict] = []
+    winners: dict = {}
+    tickers: list[str] = []
+
+
+class EvidenceAnalysisResult(BaseModel):
+    """新闻分类结果。"""
+    main_drivers: list[str] = []
+    secondary_drivers: list[str] = []
+    evidence_strength: str = "low"
+    summary: str = ""
 
 
 class StructuredResponse(BaseModel):
@@ -83,12 +109,15 @@ class StructuredResponse(BaseModel):
     - sources 记录数据和证据的来源
     - disclaimer 固定风险提示
     """
-    response_type: str = "general"       # market_data / market_reasoning / knowledge_rag / general
+    response_type: str = "general"       # market_data / market_reasoning / knowledge_rag / compare / general
     data_summary: DataSummary | None = None
     trend_summary: TrendSummary | None = None
     analysis: list[AnalysisSection] = []
     sources: list[SourceItem] = []
     disclaimer: str | None = None
+    comparison: ComparisonResult | None = None
+    evidence_analysis: EvidenceAnalysisResult | None = None
+    meta: ExplainabilityMeta | None = None
 
 
 class ChatResponse(BaseModel):
@@ -96,6 +125,7 @@ class ChatResponse(BaseModel):
     chart_data: list[ChartPoint] | None = None
     intent: str
     ticker: str | None = None
+    tickers: list[str] | None = None
     rag_used: bool | None = None
     steps: list[ThoughtStepSchema] = []
     market_meta: MarketMeta | None = None

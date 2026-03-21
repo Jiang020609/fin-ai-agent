@@ -50,6 +50,8 @@ export interface SourceItem {
   source: string;
   url: string | null;
   published_at: string | null;
+  page: string | null;
+  relevance_score: number | null;
 }
 
 export interface AnalysisSection {

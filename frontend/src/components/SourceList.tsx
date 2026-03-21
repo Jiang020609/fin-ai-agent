@@ -14,6 +14,18 @@ function sourceIcon(source: string) {
   return Database;
 }
 
+function relevanceColor(score: number): string {
+  if (score >= 0.7) return "text-green-400";
+  if (score >= 0.4) return "text-yellow-400";
+  return "text-gray-500";
+}
+
+function relevanceDot(score: number): string {
+  if (score >= 0.7) return "bg-green-400";
+  if (score >= 0.4) return "bg-yellow-400";
+  return "bg-gray-500";
+}
+
 export default function SourceList({ sources }: Props) {
   if (!sources || sources.length === 0) return null;
 
@@ -27,25 +39,34 @@ export default function SourceList({ sources }: Props) {
         return (
           <div
             key={i}
-            className="flex items-start gap-2 text-xs text-gray-400 bg-gray-800/40 rounded-lg px-2.5 py-1.5"
+            className="flex items-center gap-2 text-xs text-gray-400 bg-gray-800/40 rounded-lg px-2.5 py-1.5"
           >
-            <Icon size={12} className="mt-0.5 flex-shrink-0 text-gray-500" />
-            <div className="min-w-0 flex-1">
-              <span className="text-gray-300">{src.title || src.source}</span>
-              {src.url && (
-                <a
-                  href={src.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-0.5 ml-1.5 text-brand-500 hover:text-brand-400 transition-colors"
-                >
-                  <ExternalLink size={10} />
-                </a>
-              )}
-              {src.published_at && (
-                <span className="ml-1.5 text-gray-600">{src.published_at}</span>
-              )}
-            </div>
+            <Icon size={12} className="flex-shrink-0 text-gray-500" />
+            <span className="text-gray-300 truncate">{src.title || src.source}</span>
+            {src.page && src.page !== "-" && (
+              <span className="flex-shrink-0 px-1.5 py-0.5 rounded bg-gray-700/60 text-[10px] text-gray-400 font-mono">
+                p.{src.page}
+              </span>
+            )}
+            {src.relevance_score != null && (
+              <span className={`flex-shrink-0 flex items-center gap-1 text-[10px] ${relevanceColor(src.relevance_score)}`}>
+                <span className={`inline-block w-1.5 h-1.5 rounded-full ${relevanceDot(src.relevance_score)}`} />
+                {src.relevance_score.toFixed(2)}
+              </span>
+            )}
+            {src.url && (
+              <a
+                href={src.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-shrink-0 inline-flex items-center text-brand-500 hover:text-brand-400 transition-colors"
+              >
+                <ExternalLink size={10} />
+              </a>
+            )}
+            {src.published_at && (
+              <span className="flex-shrink-0 text-gray-600">{src.published_at}</span>
+            )}
           </div>
         );
       })}
