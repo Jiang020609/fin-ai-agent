@@ -9,6 +9,7 @@ import KPICards from "./KPICards";
 import SourceList from "./SourceList";
 import DisclaimerBar from "./DisclaimerBar";
 import TrendBadge from "./TrendBadge";
+import DataFreshness from "./DataFreshness";
 import { Bot, User, BookOpen, RotateCcw, Search } from "lucide-react";
 import { ColorConfig } from "@/lib/useColorScheme";
 
@@ -105,10 +106,11 @@ export default function MessageBubble({ message, onRetry, pairedUserMsgId, color
           ) : null}
         </div>
 
-        {/* KPI Cards */}
+        {/* KPI Cards + Data Freshness */}
         {!isUser && message.marketMeta && message.marketMeta.current_price && (
           <div className="w-full">
             <KPICards meta={message.marketMeta} />
+            <DataFreshness timestamp={sr?.data_summary?.timestamp} />
           </div>
         )}
 

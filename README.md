@@ -24,7 +24,7 @@
 graph TB
     subgraph Frontend["Frontend (Next.js + TypeScript)"]
         UI["ChatPanel / InputBar"]
-        Charts["FinancialChart + KPICards + TrendBadge"]
+        Charts["FinancialChart + KPICards + TrendBadge + DataFreshness"]
         Sources["SourceList + DisclaimerBar"]
         Thought["ThoughtChain"]
         State["useChatHistory (状态机)"]
@@ -277,6 +277,7 @@ graph TB
 │  • 行情数据 NaN/Inf/负值拦截（market.py 数据清洗）          │
 │  • 价格缓存 TTL 60s / 历史缓存 1h                           │
 │  • 降级缓存显式标注 stale + age                             │
+│  • 空结果拦截：API 无数据时直接返回提示，不调用 LLM          │
 ├─────────────────────────────────────────────────────────────┤
 │ 第三层：输出约束                                            │
 │                                                             │
@@ -350,9 +351,10 @@ fin-ai-agent/
 │   │   │   ├── MessageBubble.tsx     # 消息气泡：Markdown + 结构化卡片
 │   │   │   ├── FinancialChart.tsx    # 走势图：Recharts AreaChart
 │   │   │   ├── KPICards.tsx          # KPI 卡片：价格/涨跌/PE/市值
+│   │   │   ├── DataFreshness.tsx    # 数据更新时间标注
 │   │   │   ├── TrendBadge.tsx        # 趋势标签：方向 + 置信度 + 依据
 │   │   │   ├── ThoughtChain.tsx      # 思维链：可折叠推理步骤
-│   │   │   ├── SourceList.tsx        # 来源列表：行情API/Web搜索/知识库
+│   │   │   ├── SourceList.tsx        # 来源列表：页码徽章 + 相关度指示器
 │   │   │   ├── DisclaimerBar.tsx     # 风险声明条
 │   │   │   ├── ExampleQuestions.tsx   # 示例问题卡片
 │   │   │   └── InputBar.tsx          # 输入框
@@ -454,6 +456,10 @@ docker compose up --build
 - [x] 事实核查（LLM 自检 + 数字交叉验证）
 - [x] 结构化回答（data_summary / trend_summary 程序组装）
 - [x] Docker 一键部署
+- [x] 量化指标增强：对比分析支持 **夏普比率** (Sharpe Ratio) 和 **最大回撤** (Max Drawdown)
+- [x] 引用溯源 (Citations)：RAG 来源附带 **页码** 和 **相关度评分**，前端渲染徽章
+- [x] 空结果处理：API 无数据时明确告知用户（如"yfinance 无法获取该资产数据"），不从训练数据猜测
+- [x] 数据有效期标注：KPI 卡片下方显示 **数据更新时间**（UTC+8）
 
 ### 可继续优化
 

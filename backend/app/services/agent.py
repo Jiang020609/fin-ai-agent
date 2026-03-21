@@ -234,6 +234,22 @@ def _parse_rag_sources(context: str) -> list[dict]:
 
 
 # ========== 结构化回答组装工具 ==========
+def _build_no_data_message(ticker: str) -> str:
+    """构建数据不可用时的用户友好提示，避免 LLM 从训练数据猜测。"""
+    return (
+        f"抱歉，yfinance 目前无法获取 **{ticker}** 的实时数据。\n\n"
+        "**可能原因：**\n\n"
+        f"- 该代码 ({ticker}) 可能不存在、已退市，或属于 yfinance 未覆盖的小众资产\n\n"
+        "- Yahoo Finance API 暂时不可用或被限流\n\n"
+        "- 网络连接异常\n\n"
+        "**建议：**\n\n"
+        "- 检查 Ticker 是否正确（如苹果应为 AAPL、腾讯应为 0700.HK）\n\n"
+        "- 尝试使用主流交易所的标准代码查询\n\n"
+        "- 稍后重试\n\n"
+        "> 系统严格基于 API 返回的数据回答，不会从训练数据中猜测价格。"
+    )
+
+
 _DISCLAIMER_MARKET = "以上数据来自第三方行情接口，可能存在延迟。分析内容仅供参考，不构成投资建议。"
 _DISCLAIMER_REASONING = "新闻归因存在不确定性，不同信息源可能有不同解读。以上分析不构成投资建议。"
 
@@ -417,17 +433,7 @@ def handle_market_question(question: str, ticker: str, steps: list[ThoughtStep],
             result="数据完全不可用，无缓存可降级",
             detail={"grounding_issues": validation["issues"]},
         ))
-        text_response = (
-            f"抱歉，当前无法获取 **{ticker}** 的行情数据。\n\n"
-            "**可能原因：**\n"
-            "- Yahoo Finance API 暂时不可用或被限流\n"
-            "- 网络连接异常\n"
-            "- 该 Ticker 可能不存在或已退市\n\n"
-            "**建议：**\n"
-            "- 请稍后重试\n"
-            "- 或尝试使用标准代码查询（如 BABA、TSLA、AAPL）\n\n"
-            "> 系统正在自动重试，如持续失败请检查网络连接。"
-        )
+        text_response = _build_no_data_message(ticker)
         steps.append(ThoughtStep(step="生成降级回复", result="返回用户友好提示"))
         return {
             "text_response": text_response,
@@ -603,6 +609,16 @@ def handle_market_reasoning_question(
         "current_price": market_data.get("price", {}).get("current_price"),
         "7d_trend": market_data.get("change_7d", {}).get("trend"),
     }
+
+    if not data_available:
+        steps.append(ThoughtStep(step="数据校验", result="数据完全不可用"))
+        return {
+            "text_response": _build_no_data_message(ticker),
+            "chart_data": None,
+            "intent": "market_reasoning",
+            "ticker": ticker,
+            "steps": [asdict(s) for s in steps],
+        }
 
     # Step: Web 搜索相关新闻/事件（使用优化搜索 query）
     steps.append(ThoughtStep(step="搜索新闻证据", result="搜索中..."))
@@ -1321,12 +1337,7 @@ def _stream_market(question: str, ticker: str, steps: list[ThoughtStep], history
     if not data_available and not is_stale:
         steps.append(ThoughtStep(step="数据校验", result="数据完全不可用"))
         yield {"event": "thought", "data": asdict(steps[-1])}
-        text = (
-            f"抱歉，当前无法获取 **{ticker}** 的行情数据。\n\n"
-            "**可能原因：**\n- Yahoo Finance API 暂时不可用或被限流\n- 网络连接异常\n\n"
-            "**建议：** 请稍后重试"
-        )
-        yield {"event": "token", "data": text}
+        yield {"event": "token", "data": _build_no_data_message(ticker)}
         yield {"event": "done", "data": {"steps": [asdict(s) for s in steps]}}
         return
 
@@ -1340,6 +1351,11 @@ def _stream_market(question: str, ticker: str, steps: list[ThoughtStep], history
         steps.append(ThoughtStep(step="数据校验", result="数据校验通过（实时）"))
         user_message = MARKET_USER_TEMPLATE.format(question=question, market_data=market_data_str)
     yield {"event": "thought", "data": asdict(steps[-1])}
+
+    # 注入缺失字段提示（与非流式路径一致）
+    missing_notice = build_missing_field_notice(market_data)
+    if missing_notice:
+        user_message += f"\n\n⚠️ {missing_notice}请在回答中明确告知用户哪些数据无法获取，不要编造。"
 
     # 流式 LLM
     steps.append(ThoughtStep(step="LLM生成回答", result="流式生成中..."))
@@ -1466,8 +1482,7 @@ def _stream_market_reasoning(question: str, ticker: str, steps: list[ThoughtStep
     if not data_available:
         steps.append(ThoughtStep(step="数据校验", result="数据完全不可用"))
         yield {"event": "thought", "data": asdict(steps[-1])}
-        text = f"抱歉，当前无法获取 **{ticker}** 的行情数据，无法进行原因分析。请稍后重试。"
-        yield {"event": "token", "data": text}
+        yield {"event": "token", "data": _build_no_data_message(ticker)}
         yield {"event": "done", "data": {"steps": [asdict(s) for s in steps]}}
         return
 
