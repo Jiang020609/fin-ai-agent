@@ -1,12 +1,14 @@
 "use client";
 
-import { TrendingUp, BookOpen, BarChart3 } from "lucide-react";
+import { TrendingUp, BookOpen, BarChart3, Search, MessageCircle, GitCompare } from "lucide-react";
 
 const EXAMPLES = [
-  { icon: TrendingUp, text: "特斯拉近期走势如何？", color: "text-yellow-500" },
   { icon: BarChart3, text: "阿里巴巴当前股价是多少？", color: "text-blue-400" },
+  { icon: Search, text: "特斯拉最近为什么跌？", color: "text-orange-400" },
   { icon: BookOpen, text: "什么是市盈率？", color: "text-purple-400" },
+  { icon: GitCompare, text: "苹果和微软对比一下", color: "text-yellow-500" },
   { icon: BookOpen, text: "收入和净利润的区别是什么？", color: "text-green-400" },
+  { icon: TrendingUp, text: "英伟达近期走势如何？", color: "text-cyan-400" },
 ];
 
 interface Props {
@@ -24,7 +26,7 @@ export default function ExampleQuestions({ onSelect }: Props) {
           智能金融问答 — 实时行情 + 知识检索
         </p>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-lg">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 w-full max-w-2xl">
         {EXAMPLES.map((ex) => (
           <button
             key={ex.text}

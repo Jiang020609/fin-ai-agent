@@ -216,48 +216,74 @@ def _load_bm25_index():
 #  构建 / 加载 向量库 + BM25
 # ================================================================
 
-def build_vectorstore(force_rebuild: bool = False) -> Chroma:
-    """构建或加载向量数据库 + BM25 索引。"""
+def build_vectorstore(force_rebuild: bool = False) -> Chroma | None:
+    """构建或加载向量数据库 + BM25 索引。
+
+    即使向量库构建失败（如 embedding API 不可用），也会构建 BM25 索引，
+    确保系统至少有关键词检索能力。
+    """
     global _vectorstore, _bm25_index, _bm25_chunks
-    embeddings = _get_embeddings()
 
-    # 尝试加载已有数据库
-    if not force_rebuild and _CHROMA_DIR.exists():
-        try:
-            _vectorstore = Chroma(
-                persist_directory=str(_CHROMA_DIR),
-                embedding_function=embeddings,
-                collection_name="financial_knowledge",
-            )
-            count = _vectorstore._collection.count()
-            if count > 0:
-                logger.info("Loaded existing ChromaDB with %d documents", count)
-                # 同步加载 BM25
-                _bm25_index, _bm25_chunks = _load_bm25_index()
-                return _vectorstore
-        except Exception as e:
-            logger.warning("Failed to load existing ChromaDB: %s", e)
+    # 1. 尝试加载已有 BM25 索引
+    _bm25_index, _bm25_chunks = _load_bm25_index()
 
-    # 重新构建
-    logger.info("Building vector store from documents...")
-    documents = _load_documents()
-    if not documents:
-        raise RuntimeError(f"No documents found in {_DATA_DIR}")
+    # 2. 尝试加载/构建向量库
+    try:
+        embeddings = _get_embeddings()
 
-    chunks = _chunk_documents(documents)
+        if not force_rebuild and _CHROMA_DIR.exists():
+            try:
+                _vectorstore = Chroma(
+                    persist_directory=str(_CHROMA_DIR),
+                    embedding_function=embeddings,
+                    collection_name="financial_knowledge",
+                )
+                count = _vectorstore._collection.count()
+                if count > 0:
+                    logger.info("Loaded existing ChromaDB with %d documents", count)
+                    # BM25 已在上面加载
+                    if _bm25_index is None:
+                        documents = _load_documents()
+                        if documents:
+                            chunks = _chunk_documents(documents)
+                            _bm25_index, _bm25_chunks = _build_bm25_index(chunks)
+                    return _vectorstore
+            except Exception as e:
+                logger.warning("Failed to load existing ChromaDB: %s", e)
 
-    _vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=str(_CHROMA_DIR),
-        collection_name="financial_knowledge",
-    )
-    logger.info("Vector store built and persisted to %s", _CHROMA_DIR)
+        # 重新构建
+        logger.info("Building vector store from documents...")
+        documents = _load_documents()
+        if not documents:
+            raise RuntimeError(f"No documents found in {_DATA_DIR}")
 
-    # 同步构建 BM25
-    _bm25_index, _bm25_chunks = _build_bm25_index(chunks)
+        chunks = _chunk_documents(documents)
 
-    return _vectorstore
+        _vectorstore = Chroma.from_documents(
+            documents=chunks,
+            embedding=embeddings,
+            persist_directory=str(_CHROMA_DIR),
+            collection_name="financial_knowledge",
+        )
+        logger.info("Vector store built and persisted to %s", _CHROMA_DIR)
+
+        # 同步构建 BM25
+        _bm25_index, _bm25_chunks = _build_bm25_index(chunks)
+        return _vectorstore
+
+    except Exception as e:
+        logger.error("Vector store initialization failed: %s", e)
+        # 向量库失败，但仍尝试构建 BM25（纯关键词检索兜底）
+        if _bm25_index is None:
+            try:
+                documents = _load_documents()
+                if documents:
+                    chunks = _chunk_documents(documents)
+                    _bm25_index, _bm25_chunks = _build_bm25_index(chunks)
+                    logger.info("BM25-only mode: vector search unavailable, keyword search active (%d chunks)", len(chunks))
+            except Exception as bm25_err:
+                logger.error("BM25 build also failed: %s", bm25_err)
+        return None
 
 
 def get_vectorstore() -> Chroma:
@@ -266,6 +292,11 @@ def get_vectorstore() -> Chroma:
     if _vectorstore is None:
         _vectorstore = build_vectorstore()
     return _vectorstore
+
+
+def is_rag_available() -> bool:
+    """检查 RAG 系统是否可用（向量检索或 BM25 至少一个可用）。"""
+    return _vectorstore is not None or _bm25_index is not None
 
 
 # ================================================================
@@ -407,24 +438,31 @@ def get_relevant_context(query: str, top_k: int = 4) -> str:
     Returns:
         拼接后的参考资料文本；若无匹配则返回空字符串
     """
-    # 确保索引已加载
-    get_vectorstore()
-
     hybrid_weight = _get_hybrid_weight()
 
     # Step 1: 双路检索
     bm25_results = _bm25_search(query, top_k=10)
-    vector_results = _vector_search(query, top_k=10)
+
+    # 向量检索（仅在 vectorstore 可用时执行）
+    vector_results = []
+    if _vectorstore is not None:
+        vector_results = _vector_search(query, top_k=10)
 
     # Step 2: 融合
-    if bm25_results:
+    if bm25_results and vector_results:
         fused = _reciprocal_rank_fusion(bm25_results, vector_results, hybrid_weight)
         logger.info("Hybrid search: BM25=%d, Vector=%d, Fused=%d",
                      len(bm25_results), len(vector_results), len(fused))
-    else:
-        # BM25 不可用，回退纯向量 + 阈值过滤
+    elif bm25_results:
+        # BM25-only 模式（向量库不可用）
+        fused = bm25_results
+        logger.info("BM25-only search: %d results (vector unavailable)", len(fused))
+    elif vector_results:
+        # 纯向量 + 阈值过滤
         fused = [(doc, score) for doc, score in vector_results if score >= 0.3]
-        logger.info("Fallback to vector-only search: %d results", len(fused))
+        logger.info("Vector-only search: %d results", len(fused))
+    else:
+        fused = []
 
     if not fused:
         logger.info("No results for query: %s", query)

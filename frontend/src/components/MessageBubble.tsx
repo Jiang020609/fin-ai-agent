@@ -10,6 +10,8 @@ import SourceList from "./SourceList";
 import DisclaimerBar from "./DisclaimerBar";
 import TrendBadge from "./TrendBadge";
 import DataFreshness from "./DataFreshness";
+import ComparisonTable from "./ComparisonTable";
+import EvidenceAnalysis from "./EvidenceAnalysis";
 import { Bot, User, BookOpen, RotateCcw, Search } from "lucide-react";
 import { ColorConfig } from "@/lib/useColorScheme";
 
@@ -65,6 +67,8 @@ export default function MessageBubble({ message, onRetry, pairedUserMsgId, color
   const hasSources = sr && sr.sources && sr.sources.length > 0;
   const hasDisclaimer = sr && sr.disclaimer;
   const hasTrend = sr && sr.trend_summary && sr.trend_summary.label && sr.trend_summary.label !== "unknown";
+  const hasComparison = sr && sr.comparison && sr.comparison.assets && sr.comparison.assets.length > 0;
+  const hasEvidence = sr && sr.evidence_analysis && (sr.evidence_analysis.main_drivers?.length > 0 || sr.evidence_analysis.summary);
 
   return (
     <div className={`flex gap-3 ${isUser ? "flex-row-reverse" : ""}`}>
@@ -84,7 +88,7 @@ export default function MessageBubble({ message, onRetry, pairedUserMsgId, color
       </div>
 
       {/* Content */}
-      <div className={`flex-1 max-w-[85%] ${isUser ? "flex flex-col items-end" : ""}`}>
+      <div className={`flex-1 max-w-[95%] sm:max-w-[85%] ${isUser ? "flex flex-col items-end" : ""}`}>
         <div
           className={`rounded-2xl px-4 py-3 ${
             isUser
@@ -130,6 +134,20 @@ export default function MessageBubble({ message, onRetry, pairedUserMsgId, color
         {!isUser && message.chartData && message.ticker && (
           <div className="w-full mt-1">
             <FinancialChart data={message.chartData} ticker={message.ticker} colorConfig={colorConfig} />
+          </div>
+        )}
+
+        {/* Comparison Table (compare intent) */}
+        {!isUser && !message.loading && hasComparison && (
+          <div className="w-full">
+            <ComparisonTable comparison={sr!.comparison!} />
+          </div>
+        )}
+
+        {/* Evidence Analysis (market_reasoning intent) */}
+        {!isUser && !message.loading && hasEvidence && (
+          <div className="w-full">
+            <EvidenceAnalysis evidence={sr!.evidence_analysis!} />
           </div>
         )}
 

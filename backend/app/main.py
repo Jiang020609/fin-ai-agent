@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
         build_vectorstore()
         logger.info("Knowledge base loaded successfully")
     except Exception as e:
-        logger.warning("Knowledge base not available: %s", e)
+        logger.error("Knowledge base FAILED to load: %s — RAG queries will fallback to web search", e)
     yield
 
 app = FastAPI(
@@ -42,4 +42,16 @@ app.include_router(chat_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    try:
+        from app.services.rag import is_rag_available
+        rag_ok = is_rag_available()
+    except Exception:
+        rag_ok = False
+    return {"status": "ok", "rag_available": rag_ok}
+
+
+@app.get("/api/metrics")
+async def get_metrics():
+    """返回系统运行指标快照。"""
+    from app.services.metrics import metrics
+    return metrics.snapshot()

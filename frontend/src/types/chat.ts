@@ -59,13 +59,56 @@ export interface AnalysisSection {
   content: string;
 }
 
+// ========== 对比分析类型 ==========
+
+export interface ComparisonAsset {
+  ticker: string;
+  name: string;
+  current_price: number | null;
+  currency: string;
+  return_7d: number | null;
+  return_30d: number | null;
+  volatility_30d: number | null;
+  sharpe_30d: number | null;
+  max_drawdown_30d: number | null;
+  data_available: boolean;
+}
+
+export interface ComparisonWinner {
+  ticker: string;
+  value: number;
+}
+
+export interface ComparisonResult {
+  assets: ComparisonAsset[];
+  winners: Record<string, ComparisonWinner>;
+  tickers: string[];
+  assumptions?: {
+    risk_free_rate: number;
+    risk_free_rate_note: string;
+    max_drawdown_note: string;
+  };
+}
+
+// ========== 证据分析类型 ==========
+
+export interface EvidenceAnalysis {
+  main_drivers: string[];
+  secondary_drivers: string[];
+  evidence_strength: string;       // strong / moderate / weak
+  summary: string;
+}
+
 export interface StructuredResponse {
-  response_type: string;       // market_data / market_reasoning / knowledge_rag / general
+  response_type: string;       // market_data / market_reasoning / knowledge_rag / compare / general
   data_summary: DataSummary | null;
   trend_summary: TrendSummary | null;
   analysis: AnalysisSection[];
   sources: SourceItem[];
   disclaimer: string | null;
+  comparison?: ComparisonResult | null;
+  evidence_analysis?: EvidenceAnalysis | null;
+  meta?: Record<string, unknown> | null;
 }
 
 // ========== API 响应 & 消息 ==========

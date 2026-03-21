@@ -49,7 +49,7 @@ export default function InputBar({ onSend, disabled }: Props) {
               handleInput();
             }}
             onKeyDown={handleKeyDown}
-            placeholder="输入金融问题，如：阿里巴巴当前股价？什么是市盈率？"
+            placeholder={disabled ? "正在分析中..." : "输入金融问题，Enter 发送，Shift+Enter 换行"}
             disabled={disabled}
             rows={1}
             className="w-full bg-gray-800/60 border border-gray-700 rounded-xl px-4 py-3 pr-12

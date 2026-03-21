@@ -66,6 +66,11 @@ def resolve_ticker(query: str) -> str | None:
     """
     cleaned = query.strip()
 
+    # 先在映射表中查找（优先于 ticker 格式判断，避免 "tesla" 被误认为 ticker）
+    key = cleaned.lower()
+    if key in _TICKER_MAP:
+        return _TICKER_MAP[key]
+
     # 如果输入看起来就是 ticker（如 BABA, 0700.HK, ^GSPC）
     upper = cleaned.upper()
     if upper.isascii() and upper.isalpha() and len(upper) <= 5:
@@ -73,14 +78,42 @@ def resolve_ticker(query: str) -> str | None:
     if ("." in cleaned or cleaned.startswith("^")) and upper.isascii():
         return upper
 
-    # 在映射表中查找
-    key = cleaned.lower()
-    if key in _TICKER_MAP:
-        return _TICKER_MAP[key]
-
     # 子串模糊匹配（用户说 "阿里巴巴的股价" → 提取 "阿里巴巴"）
     for name, ticker in _TICKER_MAP.items():
         if name in key:
             return ticker
 
     return None
+
+
+def resolve_tickers_multi(query: str) -> list[str]:
+    """从用户问题中提取所有匹配的 ticker（去重）。
+
+    按 map key 长度倒序匹配，避免"阿里"先于"阿里巴巴"命中。
+    同时识别直接写出的 ticker（如 AAPL、MSFT）。
+    """
+    found: dict[str, str] = {}  # ticker -> matched_key (用于去重)
+    lower_query = query.lower()
+
+    # 1. 按 key 长度倒序扫描映射表，避免短 key 优先匹配
+    sorted_entries = sorted(_TICKER_MAP.items(), key=lambda kv: len(kv[0]), reverse=True)
+    remaining = lower_query
+    for name, ticker in sorted_entries:
+        if name in remaining and ticker not in found:
+            found[ticker] = name
+            # 移除已匹配片段，防止子串重复命中（如"阿里巴巴"命中后不再命中"阿里"）
+            remaining = remaining.replace(name, " ", 1)
+
+    # 2. 扫描大写 ticker 模式（如 AAPL、MSFT、0700.HK）
+    import re
+    for m in re.finditer(r'\b([A-Z]{1,5})\b', query):
+        candidate = m.group(1)
+        if candidate not in found and len(candidate) >= 2:
+            found[candidate] = candidate
+    # 带数字的港股/指数 ticker
+    for m in re.finditer(r'\b(\d{4}\.HK|\^[A-Z]+)\b', query, re.IGNORECASE):
+        candidate = m.group(1).upper()
+        if candidate not in found:
+            found[candidate] = candidate
+
+    return list(found.keys())

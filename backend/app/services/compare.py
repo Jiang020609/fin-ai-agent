@@ -33,7 +33,10 @@ def _calc_volatility(history: list[dict]) -> float | None:
     return round(annualized, 4)
 
 
-def _calc_sharpe_ratio(history: list[dict], annualized_risk_free: float = 0.04) -> float | None:
+RISK_FREE_RATE = 0.04  # 年化无风险利率假设（约等于 10Y US Treasury）
+
+
+def _calc_sharpe_ratio(history: list[dict], annualized_risk_free: float = RISK_FREE_RATE) -> float | None:
     """计算年化夏普比率。
 
     Sharpe = (mean_daily_return - daily_rf) / daily_std × √252
@@ -174,4 +177,9 @@ def compute_comparison(summaries: dict[str, dict]) -> dict:
         "assets": assets,
         "winners": winners,
         "tickers": list(summaries.keys()),
+        "assumptions": {
+            "risk_free_rate": RISK_FREE_RATE,
+            "risk_free_rate_note": f"夏普比率基于年化 {RISK_FREE_RATE*100:.0f}% 无风险利率计算",
+            "max_drawdown_note": "最大回撤为负数，越接近 0 表示下行风险越小",
+        },
     }

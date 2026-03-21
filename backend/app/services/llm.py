@@ -75,6 +75,138 @@ def chat_completion_stream(
             yield chunk.choices[0].delta.content
 
 
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "query_market_data",
+            "description": "查询股票/资产的实时价格、涨跌幅、走势等行情数据",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string", "description": "股票代码或名称"},
+                    "metrics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "需要查询的指标，如 price, change_7d, change_30d, volume",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_market_movement",
+            "description": "分析股票/资产价格涨跌的原因，需要行情数据和新闻证据",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string", "description": "股票代码或名称"},
+                    "time_range": {"type": "string", "description": "关注的时间范围，如 today, this_week, specific date"},
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_assets",
+            "description": "对比多个股票/资产的表现、指标差异",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tickers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要对比的股票代码或名称列表（至少2个）",
+                    },
+                },
+                "required": ["tickers"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_financial_knowledge",
+            "description": "查询金融概念、术语定义、财务指标解释等知识性问题",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "要查询的金融概念或术语"},
+                },
+                "required": ["topic"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "general_chat",
+            "description": "处理与金融无关的闲聊或无法归类的问题",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "用户消息"},
+                },
+                "required": ["message"],
+            },
+        },
+    },
+]
+
+_TOOL_TO_INTENT = {
+    "query_market_data": "market_data",
+    "analyze_market_movement": "market_reasoning",
+    "compare_assets": "compare",
+    "query_financial_knowledge": "knowledge_rag",
+    "general_chat": "general",
+}
+
+
+def classify_intent_with_tools(question: str) -> tuple[str, dict]:
+    """使用 OpenAI Function Calling (tools) 进行意图分类。
+
+    返回 (intent, tool_args)：
+    - intent: 归一化后的意图字符串
+    - tool_args: LLM 解析出的工具参数（含 ticker 等信息）
+    """
+    import json as _json
+
+    client = _get_client()
+    try:
+        response = client.chat.completions.create(
+            model=get_model(),
+            messages=[
+                {"role": "system", "content": "根据用户问题选择最合适的工具。"},
+                {"role": "user", "content": question},
+            ],
+            tools=TOOL_SCHEMAS,
+            tool_choice="required",
+            temperature=0,
+            max_tokens=200,
+        )
+        msg = response.choices[0].message
+        if msg.tool_calls:
+            tool_call = msg.tool_calls[0]
+            fn_name = tool_call.function.name
+            try:
+                tool_args = _json.loads(tool_call.function.arguments)
+            except (_json.JSONDecodeError, TypeError):
+                tool_args = {}
+            intent = _TOOL_TO_INTENT.get(fn_name, "general")
+            return intent, tool_args
+    except Exception:
+        pass
+
+    # Fallback to text-based classification
+    fallback = classify_intent(question)
+    return fallback, {}
+
+
 def classify_intent(question: str) -> str:
     """使用 LLM 判断用户意图：market_data / market_reasoning / knowledge / general。
 

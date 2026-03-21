@@ -2,8 +2,6 @@
 
 import { ChartPoint } from "@/types/chat";
 import {
-  LineChart,
-  Line,
   XAxis,
   YAxis,
   Tooltip,
@@ -13,14 +11,25 @@ import {
   CartesianGrid,
 } from "recharts";
 import { TrendingUp, TrendingDown } from "lucide-react";
+import { ColorConfig } from "@/lib/useColorScheme";
 
 interface Props {
   data: ChartPoint[];
   ticker: string;
+  colorConfig?: ColorConfig;
 }
 
-export default function FinancialChart({ data, ticker }: Props) {
+const DEFAULT_COLORS: ColorConfig = {
+  up: "#ef4444",
+  down: "#22c55e",
+  upBg: "rgba(239,68,68,0.1)",
+  downBg: "rgba(34,197,94,0.1)",
+};
+
+export default function FinancialChart({ data, ticker, colorConfig }: Props) {
   if (!data || data.length === 0) return null;
+
+  const colors = colorConfig || DEFAULT_COLORS;
 
   const first = data[0].close;
   const last = data[data.length - 1].close;
@@ -28,8 +37,7 @@ export default function FinancialChart({ data, ticker }: Props) {
   const changePct = ((change / first) * 100).toFixed(2);
   const isUp = change >= 0;
 
-  const color = isUp ? "#ef4444" : "#22c55e"; // 中国习惯：红涨绿跌
-  const bgGradient = isUp ? "rgba(239,68,68,0.1)" : "rgba(34,197,94,0.1)";
+  const color = isUp ? colors.up : colors.down;
 
   const minClose = Math.min(...data.map((d) => d.close));
   const maxClose = Math.max(...data.map((d) => d.close));
@@ -48,9 +56,8 @@ export default function FinancialChart({ data, ticker }: Props) {
           </span>
         </div>
         <div
-          className={`flex items-center gap-1 text-sm font-medium ${
-            isUp ? "text-up" : "text-down"
-          }`}
+          className="flex items-center gap-1 text-sm font-medium"
+          style={{ color }}
         >
           {isUp ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
           <span>
@@ -77,7 +84,7 @@ export default function FinancialChart({ data, ticker }: Props) {
           <XAxis
             dataKey="date"
             tick={{ fill: "#9ca3af", fontSize: 11 }}
-            tickFormatter={(d: string) => d.slice(5)} // "03-13"
+            tickFormatter={(d: string) => d.slice(5)}
             axisLine={{ stroke: "#374151" }}
             tickLine={false}
           />
@@ -111,7 +118,7 @@ export default function FinancialChart({ data, ticker }: Props) {
       </ResponsiveContainer>
 
       {/* Footer stats */}
-      <div className="flex justify-between text-xs text-gray-500 mt-2 px-1">
+      <div className="flex flex-col sm:flex-row justify-between text-xs text-gray-500 mt-2 px-1 gap-1">
         <span>
           区间: {data[0].date} ~ {data[data.length - 1].date}
         </span>

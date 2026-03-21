@@ -20,6 +20,56 @@
 
 ## 系统架构
 
+```
+    用户浏览器
+        │
+        ▼
+┌──────────────────────────────────────────────────┐
+│  Frontend  (Next.js + TypeScript)                │
+│                                                  │
+│  InputBar → useChatHistory(状态机) → api.ts(SSE) │
+│                                                  │
+│  渲染组件:                                       │
+│    MessageBubble   KPICards        FinancialChart │
+│    ThoughtChain    TrendBadge     ComparisonTable │
+│    SourceList      EvidenceAnalysis DataFreshness │
+└──────────────────────┬───────────────────────────┘
+                       │  SSE: thought/meta/chart/token/done
+                       ▼
+┌──────────────────────────────────────────────────┐
+│  Backend  (FastAPI)                              │
+│                                                  │
+│  Phase 1 ─ Query Understanding     [agent.py]    │
+│    Session消解 → 查询改写 → Ticker提取 → 意图分类│
+│    (正则快速分类 → LLM Function Call fallback)   │
+│                                                  │
+│  Phase 2 ─ Plan Generation     [orchestrator.py] │
+│    意图 → PLAN_TEMPLATE → 有序步骤列表           │
+│                                                  │
+│  Phase 3 ─ Step Execution          [steps.py]    │
+│    22个@register_step函数, 共享StepContext        │
+│    fetch → validate → prompt → LLM → assemble    │
+│                                                  │
+│  底层服务:                                       │
+│  ┌────────────┐ ┌─────────────┐ ┌──────────────┐│
+│  │ market.py  │ │  rag.py     │ │ grounding.py ││
+│  │ 4源级联    │ │ BM25+Vector │ │ 三层准确性   ││
+│  │ +缓存降级  │ │ +LLM Rerank │ │ 控制         ││
+│  └─────┬──────┘ └──────┬──────┘ └──────────────┘│
+└────────┼───────────────┼────────────────────────-┘
+         ▼               ▼
+┌──────────────────────────────────────────────────┐
+│  External Services                               │
+│                                                  │
+│  Yahoo Finance / Finnhub / Alpha Vantage / Stooq │
+│  OpenAI / OpenRouter  (LLM + Embedding)          │
+│  Tavily / SerpAPI     (Web Search)               │
+└──────────────────────────────────────────────────┘
+```
+
+<details>
+<summary>Mermaid 版本（支持渲染的环境可展开）</summary>
+
 ```mermaid
 graph TB
     subgraph Frontend["Frontend (Next.js + TypeScript)"]
@@ -34,7 +84,9 @@ graph TB
 
     subgraph Backend["Backend (FastAPI)"]
         Router["chat.py (API 路由)"]
-        Agent["agent.py (Agent 编排)"]
+        Agent["agent.py (Query Understanding)"]
+        Orchestrator["orchestrator.py (Plan + Execute)"]
+        Steps["steps.py (22 步骤函数)"]
 
         subgraph Intent["意图分类 (双层)"]
             Regex["正则快速分类"]
@@ -43,7 +95,7 @@ graph TB
 
         subgraph Tools["工具服务"]
             Market["market.py\n4源级联 + 缓存"]
-            RAG["rag.py\nChromaDB 向量检索"]
+            RAG["rag.py\nChromaDB + BM25 混合检索"]
             WebSearch["web_search.py\nTavily / SerpAPI"]
             Trend["trend.py\n规则化趋势分类"]
         end
@@ -70,9 +122,11 @@ graph TB
     API_Client -->|POST /api/chat/stream| Router
     Router --> Agent
     Agent --> Intent
-    Agent --> Tools
-    Agent --> Grounding
-    Agent --> LLM
+    Agent --> Orchestrator
+    Orchestrator --> Steps
+    Steps --> Tools
+    Steps --> Grounding
+    Steps --> LLM
 
     Market --> Yahoo
     Market --> Finnhub
@@ -81,12 +135,14 @@ graph TB
     LLM --> OpenAI
     WebSearch --> SearchAPI
 
-    Agent -->|structured_response| Router
+    Orchestrator -->|structured_response| Router
     Router -->|SSE events| API_Client
     API_Client --> Charts
     API_Client --> Sources
     API_Client --> Thought
 ```
+
+</details>
 
 ## 核心能力
 
@@ -107,16 +163,26 @@ graph TB
 
 ### 3. 金融知识问答（RAG）
 
-- ChromaDB 向量数据库 + OpenAI Embedding
+- **三级检索降级**：ChromaDB 向量 + BM25 混合检索 → 纯 BM25 关键词检索 → Web 搜索兜底
+- Embedding 不可用时（如 OpenRouter 不支持 embedding API）自动降级为纯 BM25 模式，确保知识库始终可查
 - 文档分块（500 字符/块，80 字符重叠，按 Markdown 层级分割）
-- 相似度搜索，低于 0.3 阈值自动过滤
-- Web 搜索兜底（RAG 未命中时）
+- **混合检索**：BM25 关键词 + 向量语义 → RRF（Reciprocal Rank Fusion）融合 → LLM Rerank
+- 10 篇知识文档（41KB+），覆盖估值指标、财报分析、技术分析、宏观经济、风险管理、衍生品、公司治理、行业分析、中国市场
 - 事实核查：LLM 自检回答中的数值是否与参考资料一致，不通过则重试
 
-### 4. 多轮对话
+### 4. 多资产对比
+
+- 自动提取问题中的多个 Ticker（如"苹果和微软谁更好"）
+- 计算量化对比指标：7 日/30 日收益率、波动率、**夏普比率**、**最大回撤**
+- 自动判定各维度优胜者
+- LLM 基于量化数据生成结构化对比分析
+
+### 5. 多轮对话 & Session
 
 - 保留最近 6 条消息作为上下文
+- **Session 状态管理**（30 分钟 TTL）：记忆当前资产和意图
 - Ticker 指代回溯（如先问"阿里巴巴股价"，再问"它为什么跌"能自动关联）
+- 查询改写：模糊问题自动改写为明确查询（LLM 辅助）
 
 ### 5. 流式输出与思维链
 
@@ -146,26 +212,51 @@ graph TB
 
 ## 路由设计
 
-系统采用 **4 类意图路由**，每种路由有明确的输入、执行链路和输出格式：
+### Query Orchestrator — 三阶段架构
+
+系统采用自研的 **Query Orchestrator** 框架，将每次请求拆为三个阶段：
+
+| 阶段 | 模块 | 职责 |
+|------|------|------|
+| **Phase 1: Query Understanding** | `agent.py` | Session 消解 → 查询改写 → Ticker 提取 → 双层意图分类 |
+| **Phase 2: Plan Generation** | `orchestrator.py` | 意图 → `PLAN_TEMPLATE` 步骤序列（`build_plan()`） |
+| **Phase 3: Step Execution** | `steps.py` | 22 个 `@register_step` 步骤函数，共享 `StepContext`，支持 sync/streaming 双模式 |
+
+> **设计动机**：将隐式的代码流程（函数调用顺序 = 执行逻辑）转为显式的步骤序列模板，使流程可配置、可测试、可复用。streaming 执行引擎自动将 `assemble_*` 步骤重排到 `generate_answer` 之前，确保 meta/chart 事件先于 token 流发送。
+
+系统采用 **5 类意图路由**，通过 Query Orchestrator 统一编排为步骤序列：
 
 ```
 用户问题
     │
+    ├─ Session 消解 + 查询改写
+    │
     ├─ Ticker 识别（映射表 + 历史回溯）
     │
-    ├─ 意图分类（正则优先 → LLM fallback）
+    ├─ 意图分类（正则优先 → LLM Function Call fallback）
     │
-    ├─→ market_data      价格/走势/涨跌幅
-    │     行情API → 数据校验 → LLM解读 → 数字验证 → structured_response
+    ├─ orchestrator.build_plan(intent, assets)
+    │     意图 → PLAN_TEMPLATE → 步骤序列
     │
-    ├─→ market_reasoning  涨跌原因分析
-    │     日期提取 → 行情API → Web搜索证据 → LLM归因 → structured_response
+    ├─→ market_data（6 步）
+    │     fetch_price → validate_data → build_market_prompt →
+    │     generate_answer → validate_response_numbers → assemble_market_response
     │
-    ├─→ knowledge_rag     金融知识问答
-    │     RAG检索 → [Web搜索兜底] → LLM生成 → 事实核查 → structured_response
+    ├─→ market_reasoning（8 步）
+    │     extract_date → fetch_price → validate_data → search_news →
+    │     classify_evidence → build_reasoning_prompt → generate_answer →
+    │     assemble_reasoning_response
     │
-    └─→ general           通用问答
-          LLM 直接回答
+    ├─→ knowledge_rag（6 步）
+    │     rag_search → web_search_fallback → build_knowledge_prompt →
+    │     generate_answer → fact_check → assemble_knowledge_response
+    │
+    ├─→ compare（5 步）
+    │     fetch_prices_multi → compute_comparison → build_compare_prompt →
+    │     generate_answer → assemble_compare_response
+    │
+    └─→ general（3 步）
+          build_general_prompt → generate_answer → assemble_general_response
 ```
 
 ### 意图分类策略
@@ -174,11 +265,12 @@ graph TB
 
 | 优先级 | 类别 | 匹配关键词 |
 |--------|------|-----------|
-| 1 | `market_reasoning` | 为什么、为何、原因、大涨.*原因、why、reason |
-| 2 | `market_data` | 股价、走势、涨跌、多少钱、price、stock |
-| 3 | `knowledge_rag` | 什么是、解释、定义、what is、explain |
+| 1 | `compare` | 对比、比较、vs、哪个更好（需 2+ ticker） |
+| 2 | `market_reasoning` | 为什么、为何、原因、大涨.*原因、why、reason |
+| 3 | `market_data` | 股价、走势、涨跌、多少钱、price、stock |
+| 4 | `knowledge_rag` | 什么是、解释、定义、what is、explain |
 
-> reasoning 优先于 market_data，因为"为什么大涨"同时包含行情关键词。
+> compare 优先级最高但需要 2+ ticker；reasoning 优先于 market_data。
 
 **第二层：LLM Fallback 分类**
 
@@ -310,7 +402,7 @@ graph TB
 |----------|------|----------|------|
 | 实时股价 | yfinance → Finnhub → Alpha Vantage → Stooq | 缓存 60s | 4 源级联，任一成功即返回 |
 | 历史行情 | yfinance → Stooq | 缓存 1h | 7 日 / 30 日窗口 |
-| 金融知识 | 本地 .md/.txt → ChromaDB | 启动时加载 | 500 字符/块，80 重叠 |
+| 金融知识 | 本地 .md/.txt/.pdf → ChromaDB | 启动时加载 | 10 篇文档，41KB+，涵盖估值/财报/技术分析/宏观/风险/衍生品/行业/中国市场 |
 | 新闻证据 | Tavily / SerpAPI | 实时搜索 | 用于原因分析链路 |
 | LLM | OpenAI / OpenRouter | 按需调用 | 支持 GPT-4o-mini / DeepSeek |
 
@@ -326,13 +418,18 @@ fin-ai-agent/
 │   │   ├── routers/
 │   │   │   └── chat.py              # API 路由（chat + stream）
 │   │   ├── services/
-│   │   │   ├── agent.py             # Agent 编排：4类路由 + 思考链 + 审计日志
+│   │   │   ├── agent.py             # Query Understanding：意图分类 + Session 消解
+│   │   │   ├── orchestrator.py      # Plan Generation + Execution Engine
+│   │   │   ├── steps.py             # 22 个步骤函数（@register_step 注册）
 │   │   │   ├── market.py            # 行情服务：4源级联 + 缓存 + 重试 + 清洗
-│   │   │   ├── rag.py               # RAG 检索：ChromaDB + Embedding
+│   │   │   ├── rag.py               # RAG 检索：ChromaDB + BM25 混合 + LLM Rerank
 │   │   │   ├── llm.py               # LLM 封装：流式/非流式 + 意图分类
+│   │   │   ├── compare.py           # 多资产对比：Sharpe/MaxDrawdown 计算
 │   │   │   ├── web_search.py        # Web 搜索：Tavily / SerpAPI
+│   │   │   ├── news_classifier.py   # 证据分类：关键词驱动的归因分类
 │   │   │   ├── grounding.py         # 准确性控制层：事实核查 + 数据校验
 │   │   │   ├── trend.py             # 趋势分析：规则化分类（涨跌幅+振幅+斜率）
+│   │   │   ├── session.py           # Session 状态管理（30分钟 TTL）
 │   │   │   └── metrics.py           # 监控指标收集器
 │   │   ├── prompts/
 │   │   │   └── templates.py         # Prompt 模板（行情/原因分析/RAG/核查/分类）
@@ -450,20 +547,24 @@ docker compose up --build
 
 ### 已实现
 
+- [x] **Query Orchestrator 架构**：意图 → 步骤序列模板 → 统一执行引擎（sync + streaming 双模式）
+- [x] **22 个注册步骤函数**：通过 `@register_step` 装饰器，可独立测试、动态组合
 - [x] SSE 流式输出（打字机效果 + 思维链实时更新）
 - [x] 4 源级联行情（yfinance → Finnhub → Alpha Vantage → Stooq）
-- [x] 多轮对话（6 条上下文 + Ticker 指代回溯）
-- [x] 事实核查（LLM 自检 + 数字交叉验证）
-- [x] 结构化回答（data_summary / trend_summary 程序组装）
+- [x] 多轮对话（6 条上下文 + Ticker 指代回溯 + Session 状态管理）
+- [x] 查询改写：模糊/指代性问题自动改写为明确查询
+- [x] 三层准确性控制（数据源隔离 + 检索过滤 + 输出约束）
+- [x] 结构化回答（data_summary / trend_summary 程序组装，非 LLM 生成）
+- [x] 多资产对比分析 + **夏普比率** + **最大回撤**
+- [x] RAG 混合检索（BM25 + 向量 + RRF 融合 + LLM Rerank）
+- [x] **知识库 10 篇文档**（41KB+）：估值指标、财报分析、技术分析、宏观经济、风险管理、衍生品、公司治理、行业分析、中国市场
+- [x] 引用溯源：RAG 来源附带 **页码** 和 **相关度评分**
+- [x] 新闻证据分类：关键词驱动的自动归因（财报/政策/宏观/行业/公司）
 - [x] Docker 一键部署
-- [x] 量化指标增强：对比分析支持 **夏普比率** (Sharpe Ratio) 和 **最大回撤** (Max Drawdown)
-- [x] 引用溯源 (Citations)：RAG 来源附带 **页码** 和 **相关度评分**，前端渲染徽章
-- [x] 空结果处理：API 无数据时明确告知用户（如"yfinance 无法获取该资产数据"），不从训练数据猜测
-- [x] 数据有效期标注：KPI 卡片下方显示 **数据更新时间**（UTC+8）
 
 ### 可继续优化
 
-1. **知识库扩展**：支持 PDF 财报解析（PyMuPDF），自动从 SEC EDGAR 拉取
+1. **实时财报接入**：对接 SEC EDGAR / 交易所公告 API，自动解析最新财报
 2. **缓存升级**：生产环境替换为 Redis，支持分布式和 TTL 精细管理
 3. **监控增强**：对接 Prometheus + Grafana，基于审计日志的延迟/错误率看板
 4. **日期窗口定位**：对特定日期请求，从历史行情中精确提取该日前后数据

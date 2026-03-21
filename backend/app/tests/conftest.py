@@ -1,0 +1,12 @@
+"""测试配置 — 公共 fixture"""
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+
+
+@pytest.fixture
+def client():
+    """FastAPI TestClient fixture。"""
+    return TestClient(app)

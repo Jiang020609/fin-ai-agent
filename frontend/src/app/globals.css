@@ -22,16 +22,17 @@
 
 /* Markdown prose styling */
 .prose h1, .prose h2, .prose h3 {
-  @apply text-gray-100 font-semibold mt-4 mb-2;
+  @apply text-gray-100 font-semibold mt-6 mb-3;
 }
 .prose h1 { @apply text-xl; }
 .prose h2 { @apply text-lg; }
 .prose h3 { @apply text-base; }
-.prose p { @apply mb-2 leading-relaxed; }
-.prose ul, .prose ol { @apply ml-4 mb-2 space-y-1; }
+.prose p { @apply mb-4 leading-relaxed; }
+.prose ul, .prose ol { @apply ml-4 mb-4 space-y-2.5; }
 .prose ul { @apply list-disc; }
 .prose ol { @apply list-decimal; }
-.prose li { @apply text-gray-200; }
+.prose li { @apply text-gray-200 leading-relaxed; }
+.prose li > ul, .prose li > ol { @apply mt-2 mb-0; }
 .prose strong { @apply text-white font-semibold; }
 .prose code {
   @apply bg-gray-800 text-blue-300 px-1.5 py-0.5 rounded text-sm;
@@ -59,6 +60,27 @@
 }
 .prose a {
   @apply text-brand-500 underline;
+}
+
+/* Mobile responsive adjustments */
+@media (max-width: 640px) {
+  .prose h1 { @apply text-lg; }
+  .prose h2 { @apply text-base; }
+  .prose h3 { @apply text-sm; }
+  .prose p { @apply mb-3 text-sm; }
+  .prose li { @apply text-sm; }
+  .prose ul, .prose ol { @apply ml-3 mb-3 space-y-2; }
+  .prose table { @apply text-xs; }
+  .prose th, .prose td { @apply px-2 py-1; }
+}
+
+/* Blinking cursor for streaming */
+@keyframes cursor-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.streaming-cursor {
+  animation: cursor-blink 0.8s infinite;
 }
 
 /* Loading dots animation */
