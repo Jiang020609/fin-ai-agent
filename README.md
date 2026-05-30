@@ -1,9 +1,42 @@
 # FinAI — 基于大模型的全栈金融资产问答系统
 
+> Full-stack financial AI agent with market data, RAG knowledge retrieval, streaming LLM answers, structured charts, and grounding controls.
+
+[![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?logo=fastapi&logoColor=white)
+![Next.js](https://img.shields.io/badge/Next.js-14-black?logo=nextdotjs)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+
 一个结合实时行情 API、RAG 知识检索和大语言模型的金融问答系统。支持资产价格查询、涨跌原因分析、金融知识问答，并在架构层面系统性控制回答准确性。
+
+## 亮点
+
+| 能力 | 说明 |
+|------|------|
+| 全栈可运行 | Next.js 前端 + FastAPI 后端 + Docker Compose，一套仓库跑完整金融问答体验 |
+| 多源行情级联 | yfinance、Finnhub、Alpha Vantage、Stooq 逐级降级，降低单一数据源失败影响 |
+| RAG + Web 兜底 | 本地金融知识库支持 BM25/向量混合检索，检索失败时可切到 Web 搜索 |
+| 结构化金融分析 | 价格、趋势、KPI、对比指标、图表数据和免责声明分离输出 |
+| 准确性控制 | 数据校验、数值交叉验证、事实核查和保守措辞，减少幻觉式回答 |
+| 流式 Agent 体验 | SSE 实时推送 token、图表、meta 和思考链事件 |
+
+## 快速体验
+
+```bash
+git clone https://github.com/Jiang020609/fin-ai-agent.git
+cd fin-ai-agent
+cp .env.example .env
+# 编辑 .env，填入你自己的 OpenAI 或 OpenRouter Key
+docker compose up --build
+```
+
+启动后访问 `http://localhost:3000`。不配置 Finnhub、Alpha Vantage 或搜索 API 也可以运行，系统会使用免费行情源和本地知识库降级能力。
 
 ## 目录
 
+- [亮点](#亮点)
+- [快速体验](#快速体验)
 - [系统架构](#系统架构)
 - [核心能力](#核心能力)
 - [技术选型](#技术选型)
