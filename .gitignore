@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 *.pyc
 .env
+.env.*
+!.env.example
 .DS_Store
 *.egg-info/
 dist/

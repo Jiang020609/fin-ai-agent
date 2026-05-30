@@ -15,6 +15,9 @@
 - [本地运行](#本地运行)
 - [Docker 部署](#docker-部署)
 - [优化与扩展思考](#优化与扩展思考)
+- [贡献](#贡献)
+- [安全](#安全)
+- [许可证](#许可证)
 
 ---
 
@@ -406,6 +409,8 @@ graph TB
 | 新闻证据 | Tavily / SerpAPI | 实时搜索 | 用于原因分析链路 |
 | LLM | OpenAI / OpenRouter | 按需调用 | 支持 GPT-4o-mini / DeepSeek |
 
+> 本项目不随仓库分发第三方行情或新闻数据；运行时会根据用户配置调用对应服务。使用者需自行遵守 Yahoo Finance、Finnhub、Alpha Vantage、Stooq、Tavily、SerpAPI、OpenAI / OpenRouter 等第三方服务的条款。行情与新闻数据可能延迟或不完整，结果仅供学习和演示，不构成投资建议。
+
 ---
 
 ## 项目结构
@@ -492,12 +497,12 @@ cp .env.example .env
 ```bash
 # LLM（二选一）
 # 方案 A：OpenAI 直连
-OPENAI_API_KEY=sk-xxx
+OPENAI_API_KEY=<your-openai-api-key>
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=gpt-4o-mini
 
 # 方案 B：OpenRouter（可用 DeepSeek 等模型）
-OPENAI_API_KEY=sk-or-v1-xxx
+OPENAI_API_KEY=<your-openrouter-api-key>
 OPENAI_BASE_URL=https://openrouter.ai/api/v1
 OPENAI_MODEL=deepseek/deepseek-chat-v3-0324
 EMBEDDING_MODEL=openai/text-embedding-3-small
@@ -570,3 +575,21 @@ docker compose up --build
 4. **日期窗口定位**：对特定日期请求，从历史行情中精确提取该日前后数据
 5. **多语言**：前端 i18n + Prompt 自适应语言
 6. **更多资产类型**：加密货币、外汇、商品期货
+
+---
+
+## 贡献
+
+欢迎提交 issue 和 pull request。提交前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，并确认没有提交 API Key、`.env`、缓存、日志、私有数据或生成的向量数据库。
+
+---
+
+## 安全
+
+如果发现安全问题，请不要直接公开到 issue，详见 [SECURITY.md](SECURITY.md)。
+
+---
+
+## 许可证
+
+本项目基于 ISC License 开源，详见 [LICENSE](LICENSE)。
