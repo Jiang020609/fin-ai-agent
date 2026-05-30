@@ -1,0 +1,35 @@
+name: Bug report
+description: Report something that is broken or behaves unexpectedly.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+      placeholder: The app fails when...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Please include commands, input question, and relevant environment details.
+      placeholder: |
+        1. Start backend with...
+        2. Ask...
+        3. See...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: I expected...
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Remove API keys, private data, and `.env` values before posting.
+      render: shell

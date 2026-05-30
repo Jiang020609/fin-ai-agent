@@ -3,6 +3,7 @@
 > Full-stack financial AI agent with market data, RAG knowledge retrieval, streaming LLM answers, structured charts, and grounding controls.
 
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
+[![CI](https://github.com/Jiang020609/fin-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Jiang020609/fin-ai-agent/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?logo=fastapi&logoColor=white)
 ![Next.js](https://img.shields.io/badge/Next.js-14-black?logo=nextdotjs)
@@ -49,6 +50,7 @@ docker compose up --build
 - [Docker 部署](#docker-部署)
 - [优化与扩展思考](#优化与扩展思考)
 - [贡献](#贡献)
+- [路线图](#路线图)
 - [安全](#安全)
 - [许可证](#许可证)
 
@@ -220,7 +222,7 @@ graph TB
 - Ticker 指代回溯（如先问"阿里巴巴股价"，再问"它为什么跌"能自动关联）
 - 查询改写：模糊问题自动改写为明确查询（LLM 辅助）
 
-### 5. 流式输出与思维链
+### 6. 流式输出与思维链
 
 - SSE 实时推送：thought → token → chart → meta → done
 - 思维链可视化：展示完整的 Agent 决策过程
@@ -614,6 +616,12 @@ docker compose up --build
 ## 贡献
 
 欢迎提交 issue 和 pull request。提交前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，并确认没有提交 API Key、`.env`、缓存、日志、私有数据或生成的向量数据库。
+
+---
+
+## 路线图
+
+后续方向见 [ROADMAP.md](ROADMAP.md)。当前最适合参与的方向是截图/GIF demo、英文文档、更多数据源适配和生产级缓存。
 
 ---
 
