@@ -7,7 +7,6 @@ import pytest
 # Mock paths — 步骤函数从 steps.py 导入外部服务
 _STEPS = "app.services.steps"
 _AGENT = "app.services.agent"
-_LLM = "app.services.llm"
 
 
 def _make_market_data(**overrides):
@@ -54,7 +53,7 @@ class TestChatEndpoint:
         res = client.post("/api/chat", json={"question": "   "})
         assert res.status_code == 400
 
-    @patch(f"{_LLM}.classify_intent_with_tools", return_value=("general", {}))
+    @patch(f"{_AGENT}.classify_intent_with_tools", return_value=("general", {}))
     @patch(f"{_STEPS}.chat_completion", return_value="你好！我是金融助手。")
     def test_general_question_success(self, mock_llm, mock_intent, client):
         res = client.post("/api/chat", json={"question": "你好"})
@@ -84,7 +83,7 @@ class TestChatEndpoint:
         assert res.status_code == 500
         assert "处理失败" in res.json()["detail"]
 
-    @patch(f"{_LLM}.classify_intent_with_tools", return_value=("general", {}))
+    @patch(f"{_AGENT}.classify_intent_with_tools", return_value=("general", {}))
     @patch(f"{_STEPS}.chat_completion", return_value="回答")
     def test_response_schema_fields(self, mock_llm, mock_intent, client):
         """验证响应 schema 包含所有必需字段。"""
@@ -95,7 +94,7 @@ class TestChatEndpoint:
         assert "intent" in data
         assert "steps" in data
 
-    @patch(f"{_LLM}.classify_intent_with_tools", return_value=("general", {}))
+    @patch(f"{_AGENT}.classify_intent_with_tools", return_value=("general", {}))
     @patch(f"{_STEPS}.chat_completion", return_value="回答")
     def test_history_accepted(self, mock_llm, mock_intent, client):
         """验证 history 参数被接受。"""
@@ -136,7 +135,7 @@ class TestChatEndpoint:
 
 
 class TestStreamEndpoint:
-    @patch(f"{_LLM}.classify_intent_with_tools", return_value=("general", {}))
+    @patch(f"{_AGENT}.classify_intent_with_tools", return_value=("general", {}))
     @patch(f"{_STEPS}.chat_completion_stream")
     def test_stream_returns_sse(self, mock_stream, mock_intent, client):
         mock_stream.return_value = iter(["你", "好", "！"])
@@ -148,7 +147,7 @@ class TestStreamEndpoint:
         res = client.post("/api/chat/stream", json={"question": ""})
         assert res.status_code == 400
 
-    @patch(f"{_LLM}.classify_intent_with_tools", return_value=("general", {}))
+    @patch(f"{_AGENT}.classify_intent_with_tools", return_value=("general", {}))
     @patch(f"{_STEPS}.chat_completion_stream")
     def test_stream_events_contain_done(self, mock_stream, mock_intent, client):
         """流式响应应包含 done 事件。"""
